@@ -1,18 +1,23 @@
 {
-    "manifest_version": 3,
-    "name": "JiraNest Extension",
-    "description": "View Jira tasks and bugs directly from a Chrome sidebar.",
-    "version": "1.0.0",
-    "action": {
-      "default_popup": "index.html"
-    },
-    "permissions": [
-      "storage",
-      "identity",
-      "tabs"
-    ],
-    "host_permissions": [
-      "https://*.atlassian.net/*"
-    ]
-  }
-  
+  "manifest_version": 3,
+  "name": "Jira Auth Extension",
+  "version": "1.0.0",
+  "description": "Login to Jira using OAuth2 inside a Chrome extension",
+  "permissions": [
+    "identity",
+    "storage",
+    "tabs"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "index.html",
+    "default_title": "Jira Login"
+  },
+  "host_permissions": [
+    "https://auth.atlassian.com/*",
+    "https://api.atlassian.com/*"
+  ]
+}
