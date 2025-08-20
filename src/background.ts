@@ -120,6 +120,30 @@ async function fetchJiraMyself(): Promise<any> {
   return r2.json();
 }
 
+async function fetchJiraProjects(): Promise<any> {
+  const access = await getValidAccessToken();
+  if (!access) throw new Error("Not authenticated");
+
+  // Step 1: get accessible resources (cloud IDs)
+  const r1 = await fetch("https://api.atlassian.com/oauth/token/accessible-resources", {
+    headers: { Authorization: `Bearer ${access}`, Accept: "application/json" }
+  });
+  if (!r1.ok) throw new Error(`Resources fetch failed: ${r1.status}`);
+  const resources = await r1.json();
+  if (!Array.isArray(resources) || resources.length === 0) {
+    throw new Error("No accessible Jira sites");
+  }
+  const cloudId = resources[0].id;
+
+  // Step 2: fetch projects
+  const r2 = await fetch(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/project`, {
+    headers: { Authorization: `Bearer ${access}`, Accept: "application/json" }
+  });
+  if (!r2.ok) throw new Error(`Projects fetch failed: ${r2.status}`);
+  return r2.json();
+}
+
+// ✅ Single listener handling all messages
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     try {
@@ -155,6 +179,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (message.type === "GET_JIRA_PROFILE") {
         const jiraProfile = await fetchJiraMyself();
         sendResponse({ success: true, jiraProfile });
+        return;
+      }
+
+      if (message.type === "GET_JIRA_PROJECTS") {
+        const projects = await fetchJiraProjects();
+        sendResponse({ success: true, projects });
         return;
       }
 

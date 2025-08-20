@@ -14,15 +14,21 @@ export default function Popup() {
   const [token, setToken] = useState<TokenData | null>(null);
   const [profile, setProfile] = useState<any>(null);
   const [jiraProfile, setJiraProfile] = useState<any>(null);
+  const [projects, setProjects] = useState<any[]>([]);
+  const [selectedProject, setSelectedProject] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [showDropdown, setShowDropdown] = useState(false);
 
   useEffect(() => {
-    chrome.storage.local.get("jira_token", (data) => {
+    chrome.storage.local.get(["jira_token", "selected_project"], (data) => {
       if (data?.jira_token) {
         setLoggedIn(true);
         setToken(data.jira_token);
         fetchAll();
+      }
+      if (data?.selected_project) {
+        setSelectedProject(data.selected_project);
       }
     });
   }, []);
@@ -46,8 +52,13 @@ export default function Popup() {
     chrome.runtime.sendMessage({ type: "GET_PROFILE" }, (res) => {
       if (res?.success) setProfile(res.profile);
     });
+
     chrome.runtime.sendMessage({ type: "GET_JIRA_PROFILE" }, (res) => {
       if (res?.success) setJiraProfile(res.jiraProfile);
+    });
+
+    chrome.runtime.sendMessage({ type: "GET_JIRA_PROJECTS" }, (res) => {
+      if (res?.success) setProjects(res.projects);
     });
   };
 
@@ -57,7 +68,16 @@ export default function Popup() {
       setToken(null);
       setProfile(null);
       setJiraProfile(null);
+      setProjects([]);
+      setSelectedProject(null);
+      chrome.storage.local.remove("selected_project");
     });
+  };
+
+  const handleSelectProject = (p: any) => {
+    setSelectedProject(p);
+    chrome.storage.local.set({ selected_project: p });
+    setShowDropdown(false);
   };
 
   return (
@@ -130,6 +150,77 @@ export default function Popup() {
                 <div><b>Time zone:</b> {jiraProfile.timeZone ?? "—"}</div>
                 <div><b>Account type:</b> {jiraProfile.accountType ?? "—"}</div>
               </div>
+            ) : (
+              <div style={{ fontSize: 13, color: "#666" }}>Loading…</div>
+            )}
+          </div>
+
+          <div style={{ marginTop: 12, position: "relative" }}>
+            <h4 style={{ margin: "8px 0" }}>Projects</h4>
+            {projects.length > 0 ? (
+              <>
+                <div
+                  style={{
+                    position: "relative",
+                    border: "1px solid #ccc",
+                    borderRadius: 6,
+                    padding: 6,
+                    cursor: "pointer",
+                    background: "#fff"
+                  }}
+                  onClick={() => setShowDropdown(!showDropdown)}
+                >
+                  {selectedProject ? (
+                    <div style={{ display: "flex", alignItems: "center" }}>
+                      <img
+                        src={selectedProject.avatarUrls?.["16x16"]}
+                        alt=""
+                        style={{ width: 16, height: 16, marginRight: 6 }}
+                      />
+                      {selectedProject.name}
+                    </div>
+                  ) : (
+                    "Select a project"
+                  )}
+                </div>
+
+                {showDropdown && (
+                  <div
+                    style={{
+                      position: "absolute",
+                      marginTop: 2,
+                      border: "1px solid #ccc",
+                      borderRadius: 6,
+                      background: "#fff",
+                      width: "100%",
+                      zIndex: 10,
+                      maxHeight: 200,
+                      overflowY: "auto"
+                    }}
+                  >
+                    {projects.map((p) => (
+                      <div
+                        key={p.id}
+                        onClick={() => handleSelectProject(p)}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          padding: "6px 8px",
+                          cursor: "pointer",
+                          borderBottom: "1px solid #eee"
+                        }}
+                      >
+                        <img
+                          src={p.avatarUrls?.["16x16"]}
+                          alt=""
+                          style={{ width: 16, height: 16, marginRight: 6 }}
+                        />
+                        {p.name}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
             ) : (
               <div style={{ fontSize: 13, color: "#666" }}>Loading…</div>
             )}
