@@ -1,6 +1,6 @@
-const CLIENT_ID = "4Zmd9fm3iZkJgpzlnHoM1QA13cdDxDWh";
-const CLIENT_SECRET = "ATOAsgvr03L9ozubQfE2N-EHyNKPO359XpiiOq81N-SByH2vrNfksQAG81yEuktsuy9p9D04054B";
-const REDIRECT_URI = "https://hdalgmemjnepejjjnickmakccablekmc.chromiumapp.org/provider_cb";
+const CLIENT_ID = import.meta.env.VITE_CLIENT_ID;
+const CLIENT_SECRET = import.meta.env.VITE_CLIENT_SECRET;
+const REDIRECT_URI = import.meta.env.VITE_REDIRECT_URI;
 const SCOPES = [
   "read:jira-user",
   "read:jira-work",
