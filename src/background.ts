@@ -1,9 +1,11 @@
+// === keep your existing constants & types ===
 const CLIENT_ID = import.meta.env.VITE_CLIENT_ID;
 const CLIENT_SECRET = import.meta.env.VITE_CLIENT_SECRET;
 const REDIRECT_URI = import.meta.env.VITE_REDIRECT_URI;
 const SCOPES = [
   "read:jira-user",
   "read:jira-work",
+  "write:jira-work",   // ⬅️ required for transitions & comments
   "read:me",
   "offline_access"
 ];
@@ -14,9 +16,10 @@ type TokenData = {
   refresh_token?: string;
   scope: string;
   token_type: "Bearer";
-  expires_at?: number; // epoch ms
+  expires_at?: number;
 };
 
+// === keep your existing helper functions as-is ===
 function buildAuthUrl() {
   const base = "https://auth.atlassian.com/authorize";
   const params = new URLSearchParams({
@@ -75,11 +78,8 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenData> {
 async function getValidAccessToken(): Promise<string | null> {
   const { jira_token } = await chrome.storage.local.get("jira_token");
   if (!jira_token) return null;
-
   const token: TokenData = jira_token;
-  if (token.expires_at && Date.now() < token.expires_at) {
-    return token.access_token;
-  }
+  if (token.expires_at && Date.now() < token.expires_at) return token.access_token;
   if (token.refresh_token) {
     const refreshed = await refreshAccessToken(token.refresh_token);
     return refreshed.access_token;
@@ -87,6 +87,7 @@ async function getValidAccessToken(): Promise<string | null> {
   return null;
 }
 
+// === profile helpers kept ===
 async function fetchProfile(): Promise<any> {
   const access = await getValidAccessToken();
   if (!access) throw new Error("Not authenticated");
@@ -97,11 +98,7 @@ async function fetchProfile(): Promise<any> {
   return res.json();
 }
 
-async function fetchJiraMyself(): Promise<any> {
-  const access = await getValidAccessToken();
-  if (!access) throw new Error("Not authenticated");
-
-  // Step 1: get accessible resources (cloud IDs)
+async function getCloudId(access: string): Promise<string> {
   const r1 = await fetch("https://api.atlassian.com/oauth/token/accessible-resources", {
     headers: { Authorization: `Bearer ${access}`, Accept: "application/json" }
   });
@@ -110,9 +107,13 @@ async function fetchJiraMyself(): Promise<any> {
   if (!Array.isArray(resources) || resources.length === 0) {
     throw new Error("No accessible Jira sites");
   }
-  const cloudId = resources[0].id;
+  return resources[0].id;
+}
 
-  // Step 2: call Jira REST /myself
+async function fetchJiraMyself(): Promise<any> {
+  const access = await getValidAccessToken();
+  if (!access) throw new Error("Not authenticated");
+  const cloudId = await getCloudId(access);
   const r2 = await fetch(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/myself`, {
     headers: { Authorization: `Bearer ${access}`, Accept: "application/json" }
   });
@@ -123,19 +124,7 @@ async function fetchJiraMyself(): Promise<any> {
 async function fetchJiraProjects(): Promise<any> {
   const access = await getValidAccessToken();
   if (!access) throw new Error("Not authenticated");
-
-  // Step 1: get accessible resources (cloud IDs)
-  const r1 = await fetch("https://api.atlassian.com/oauth/token/accessible-resources", {
-    headers: { Authorization: `Bearer ${access}`, Accept: "application/json" }
-  });
-  if (!r1.ok) throw new Error(`Resources fetch failed: ${r1.status}`);
-  const resources = await r1.json();
-  if (!Array.isArray(resources) || resources.length === 0) {
-    throw new Error("No accessible Jira sites");
-  }
-  const cloudId = resources[0].id;
-
-  // Step 2: fetch projects
+  const cloudId = await getCloudId(access);
   const r2 = await fetch(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/project`, {
     headers: { Authorization: `Bearer ${access}`, Accept: "application/json" }
   });
@@ -143,7 +132,132 @@ async function fetchJiraProjects(): Promise<any> {
   return r2.json();
 }
 
-// ✅ Single listener handling all messages
+// === detect & cache story points field key (varies per site/type) ===
+async function getStoryPointsFieldKey(access: string, cloudId: string): Promise<string> {
+  const cacheKey = `sp_field_key_${cloudId}`;
+  const cached = await chrome.storage.local.get(cacheKey);
+  if (cached?.[cacheKey]) return cached[cacheKey];
+
+  // common default
+  let key = "customfield_10016";
+
+  try {
+    const r = await fetch(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/field`, {
+      headers: { Authorization: `Bearer ${access}`, Accept: "application/json" }
+    });
+    if (r.ok) {
+      const fields = await r.json();
+      const hit = fields.find((f: any) =>
+        typeof f.name === "string" &&
+        /story points?/i.test(f.name) &&
+        f.schema?.type === "number"
+      );
+      if (hit?.id) key = hit.id;
+    }
+  } catch (_) {
+    // ignore & fallback to default
+  }
+
+  await chrome.storage.local.set({ [cacheKey]: key });
+  return key;
+}
+
+// === issues, comments, transitions ===
+async function fetchJiraIssues(projectKey: string): Promise<any[]> {
+  const access = await getValidAccessToken();
+  if (!access) throw new Error("Not authenticated");
+  const cloudId = await getCloudId(access);
+  const spKey = await getStoryPointsFieldKey(access, cloudId);
+
+  const params = new URLSearchParams({
+    jql: `project = ${projectKey} ORDER BY updated DESC`,
+    maxResults: "3",
+    fields: `summary,issuetype,status,priority,comment,${spKey}`
+  });
+
+  const r = await fetch(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/search?${params}`, {
+    headers: { Authorization: `Bearer ${access}`, Accept: "application/json" }
+  });
+  if (!r.ok) throw new Error(`Issues fetch failed: ${r.status}`);
+  const data = await r.json();
+
+  // normalize story points to consistent key for UI
+  const issues = (data.issues || []).map((it: any) => ({
+    ...it,
+    fields: {
+      ...it.fields,
+      storyPoints: it.fields?.[spKey]
+    }
+  }));
+  return issues;
+}
+
+async function fetchIssueTransitions(issueKey: string): Promise<any[]> {
+  const access = await getValidAccessToken();
+  if (!access) throw new Error("Not authenticated");
+  const cloudId = await getCloudId(access);
+  const r = await fetch(
+    `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${issueKey}/transitions`,
+    { headers: { Authorization: `Bearer ${access}`, Accept: "application/json" } }
+  );
+  if (!r.ok) throw new Error(`Transitions fetch failed: ${r.status}`);
+  const data = await r.json();
+  return data.transitions || [];
+}
+
+async function transitionIssue(issueKey: string, transitionId: string): Promise<void> {
+  const access = await getValidAccessToken();
+  if (!access) throw new Error("Not authenticated");
+  const cloudId = await getCloudId(access);
+  const r = await fetch(
+    `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${issueKey}/transitions`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${access}`,
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ transition: { id: transitionId } })
+    }
+  );
+  if (!r.ok) throw new Error(`Transition failed: ${r.status}`);
+}
+
+async function fetchIssueComments(issueKey: string, maxResults = 3): Promise<any[]> {
+  const access = await getValidAccessToken();
+  if (!access) throw new Error("Not authenticated");
+  const cloudId = await getCloudId(access);
+  const params = new URLSearchParams({ maxResults: String(maxResults), orderBy: "-created" });
+  const r = await fetch(
+    `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${issueKey}/comment?${params}`,
+    { headers: { Authorization: `Bearer ${access}`, Accept: "application/json" } }
+  );
+  if (!r.ok) throw new Error(`Comments fetch failed: ${r.status}`);
+  const data = await r.json();
+  return data.comments || [];
+}
+
+async function addIssueComment(issueKey: string, text: string): Promise<void> {
+  const access = await getValidAccessToken();
+  if (!access) throw new Error("Not authenticated");
+  const cloudId = await getCloudId(access);
+  const r = await fetch(
+    `https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/issue/${issueKey}/comment`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${access}`,
+        Accept: "application/json",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ body: text })
+    }
+  );
+  if (!r.ok) throw new Error(`Add comment failed: ${r.status}`);
+}
+
+// === single onMessage listener with all cases (keeps your previous cases) ===
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     try {
@@ -188,8 +302,39 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return;
       }
 
+      // NEW handlers used by Popup.tsx
+      if (message.type === "GET_JIRA_ISSUES") {
+        const issues = await fetchJiraIssues(message.projectKey);
+        sendResponse({ success: true, issues });
+        return;
+      }
+
+      if (message.type === "GET_JIRA_TRANSITIONS") {
+        const transitions = await fetchIssueTransitions(message.issueKey);
+        sendResponse({ success: true, transitions });
+        return;
+      }
+
+      if (message.type === "TRANSITION_JIRA_ISSUE") {
+        await transitionIssue(message.issueKey, message.transitionId);
+        sendResponse({ success: true });
+        return;
+      }
+
+      if (message.type === "GET_JIRA_COMMENTS") {
+        const comments = await fetchIssueComments(message.issueKey, message.maxResults || 3);
+        sendResponse({ success: true, comments });
+        return;
+      }
+
+      if (message.type === "ADD_JIRA_COMMENT") {
+        await addIssueComment(message.issueKey, message.text);
+        sendResponse({ success: true });
+        return;
+      }
+
       if (message.type === "LOGOUT") {
-        await chrome.storage.local.remove("jira_token");
+        await chrome.storage.local.remove(["jira_token"]);
         sendResponse({ success: true });
         return;
       }
@@ -201,5 +346,5 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
   })();
 
-  return true; // async
+  return true; // keep the message channel open for async
 });
